@@ -1,0 +1,2 @@
+"""SteamSearch application package."""
+

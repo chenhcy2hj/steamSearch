@@ -1,0 +1,2 @@
+"""Plugin extension package."""
+

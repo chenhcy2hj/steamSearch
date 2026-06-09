@@ -1,0 +1,27 @@
+[steamdt]
+api_key = ""
+base_url = "https://open.steamdt.com"
+base_sync_ttl_hours = 24
+price_cache_ttl_seconds = 60
+kline_cache_ttl_seconds = 1800
+
+[buff]
+enabled = false
+cookie = ""
+min_interval_seconds = 6
+max_interval_seconds = 12
+cache_ttl_seconds = 600
+max_items_per_scan = 30
+
+[market]
+steam_fee_rate = 0.15
+wallet_discount_rate = 1.0
+min_profit = 1.0
+min_roi = 0.03
+
+[app]
+log_level = "INFO"
+theme = "system"
+database_path = "data/steamsearch.db"
+log_path = "logs/steamsearch.log"
+
