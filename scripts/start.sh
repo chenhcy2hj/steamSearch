@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+export STEAMDT_API_KEY="34f2989be64a41ae9f70b0e395582e17"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="$ROOT_DIR/run"
 LOG_DIR="$ROOT_DIR/logs"

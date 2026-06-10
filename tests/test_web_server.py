@@ -17,8 +17,10 @@ from app.ui.web_server import (
     build_demo_quote,
     build_steamdt_quote,
     find_available_port,
+    _radar_to_json,
     seed_demo_items_if_empty,
 )
+from app.market.scanner import RadarResult
 
 
 class WebServerTest(unittest.TestCase):
@@ -160,6 +162,26 @@ class WebServerTest(unittest.TestCase):
         selected = find_available_port("127.0.0.1", 8765, max_attempts=3, port_checker=fake_checker)
 
         self.assertEqual(selected, 8766)
+
+    def test_radar_to_json_formats_values(self) -> None:
+        payload = _radar_to_json(
+            RadarResult(
+                item_id=1,
+                market_hash_name="AK-47 | The Empress (Field-Tested)",
+                name_cn="皇后",
+                category="rifle",
+                buy_price=100,
+                sell_price=150,
+                net_sell_price=127.5,
+                profit=27.5,
+                roi=0.275,
+                spread=0.5,
+                risk_score=95,
+            )
+        )
+
+        self.assertEqual(payload["profit"], "¥27.50")
+        self.assertEqual(payload["roi"], "27.50%")
 
 
 if __name__ == "__main__":

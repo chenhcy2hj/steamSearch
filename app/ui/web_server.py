@@ -16,6 +16,7 @@ from app.buff.client import BuffClient
 from app.buff.dto import BuffListingSummary
 from app.buff.service import BuffService
 from app.market.calculator import ProfitCalculator, quantize_money, quantize_percent
+from app.market.scanner import RadarFilters, RadarResult, RadarScanner, build_demo_radar_candidate
 from app.storage.models import ItemAliasInput, ItemInput, ItemRecord, WatchlistInput, WatchlistRecord
 from app.storage.repositories.items import ItemRepository
 from app.storage.repositories.watchlist import WatchlistRepository
@@ -158,6 +159,9 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/watchlist":
             self._handle_list_watchlist()
             return
+        if parsed.path == "/api/radar":
+            self._handle_radar(parse_qs(parsed.query))
+            return
         if parsed.path == "/health":
             self._send_json({"ok": True})
             return
@@ -218,6 +222,43 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_list_watchlist(self) -> None:
         self._send_json({"items": [_watchlist_to_json(item) for item in self.watchlist.list_all()]})
+
+    def _handle_radar(self, query: dict[str, list[str]]) -> None:
+        keyword = _first(query, "q", "")
+        source_limit = _parse_int(_first(query, "source_limit", "80"), 80)
+        result_limit = _parse_int(_first(query, "limit", "20"), 20)
+        min_profit = _optional_decimal(_first(query, "min_profit", "0")) or Decimal("0")
+        min_roi = _optional_decimal(_first(query, "min_roi", "0")) or Decimal("0")
+
+        items = self.repository.search(keyword, limit=source_limit)
+        candidates = [
+            build_demo_radar_candidate(
+                item_id=item.id,
+                market_hash_name=item.market_hash_name,
+                name_cn=item.name_cn,
+                category=item.category,
+            )
+            for item in items
+        ]
+        scanner = RadarScanner(
+            steam_fee_rate=Decimal(str(self.app_context.settings.market.steam_fee_rate)),
+            wallet_discount_rate=Decimal(str(self.app_context.settings.market.wallet_discount_rate)),
+        )
+        results = scanner.scan(
+            candidates,
+            RadarFilters(
+                min_profit=min_profit,
+                min_roi=min_roi,
+                limit=result_limit,
+            ),
+        )
+        self._send_json(
+            {
+                "items": [_radar_to_json(item) for item in results],
+                "source": "local-demo",
+                "warning": "Radar 初版使用本地估算价格排序，未进行 SteamDT 批量粗筛或 BUFF 慢速确认。",
+            }
+        )
 
     def _handle_add_watchlist(self) -> None:
         payload = self._read_json_body()
@@ -567,6 +608,22 @@ def _watchlist_to_json(item: WatchlistRecord) -> dict[str, Any]:
     return asdict(item)
 
 
+def _radar_to_json(item: RadarResult) -> dict[str, Any]:
+    return {
+        "item_id": item.item_id,
+        "market_hash_name": item.market_hash_name,
+        "name_cn": item.name_cn,
+        "category": item.category,
+        "buy_price": _money(item.buy_price),
+        "sell_price": _money(item.sell_price),
+        "net_sell_price": _money(item.net_sell_price),
+        "profit": _money(item.profit),
+        "roi": _percent(item.roi),
+        "spread": _percent(item.spread),
+        "risk_score": str(item.risk_score),
+    }
+
+
 def _money(value: Decimal) -> str:
     return f"¥{quantize_money(Decimal(str(value)))}"
 
@@ -609,6 +666,15 @@ def _optional_float(value: Any) -> float | None:
     try:
         return float(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _optional_decimal(value: Any) -> Decimal | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
         return None
 
 

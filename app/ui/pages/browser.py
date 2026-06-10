@@ -333,6 +333,14 @@ def render_browser_page() -> str:
       display: grid;
     }
 
+    .radar-controls {
+      padding: 14px 16px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 120px 120px 90px;
+      gap: 10px;
+      border-bottom: 1px solid var(--line);
+    }
+
     .watch-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto auto;
@@ -343,6 +351,25 @@ def render_browser_page() -> str:
     }
 
     .watch-row:last-child { border-bottom: 0; }
+
+    .radar-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) 90px 90px 90px 80px;
+      gap: 10px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .radar-row.header {
+      color: var(--muted);
+      background: #f7fafc;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .radar-row:last-child { border-bottom: 0; }
 
     .watch-row strong {
       display: block;
@@ -373,6 +400,8 @@ def render_browser_page() -> str:
       .nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .grid,
       .prices { grid-template-columns: 1fr; }
+      .radar-controls,
+      .radar-row { grid-template-columns: 1fr; }
       .watch-row { grid-template-columns: 1fr auto; }
       .platform-row { grid-template-columns: 1fr 1fr; }
       .top { align-items: stretch; flex-direction: column; }
@@ -441,6 +470,19 @@ def render_browser_page() -> str:
       <div class="stack">
         <section class="panel">
           <div class="panel-header">
+            <h2>Radar 扫描</h2>
+            <span class="pill blue" id="radarCount">0 项</span>
+          </div>
+          <div class="radar-controls">
+            <input id="radarQuery" value="" placeholder="关键词，可留空">
+            <input id="radarProfit" value="0" placeholder="最低利润">
+            <input id="radarRoi" value="0" placeholder="最低 ROI，例如 0.05">
+            <button id="radarButton">扫描</button>
+          </div>
+          <div id="radarResults"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-header">
             <h2>监控列表</h2>
             <span class="pill blue" id="watchCount">0 项</span>
           </div>
@@ -461,10 +503,17 @@ def render_browser_page() -> str:
     const buffState = document.getElementById("buffState");
     const watchlist = document.getElementById("watchlist");
     const watchCount = document.getElementById("watchCount");
+    const radarButton = document.getElementById("radarButton");
+    const radarQuery = document.getElementById("radarQuery");
+    const radarProfit = document.getElementById("radarProfit");
+    const radarRoi = document.getElementById("radarRoi");
+    const radarResults = document.getElementById("radarResults");
+    const radarCount = document.getElementById("radarCount");
     let activeMarketHashName = "";
 
     searchButton.addEventListener("click", runSearch);
     syncButton.addEventListener("click", syncSteamDTBase);
+    radarButton.addEventListener("click", runRadar);
     searchInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") runSearch();
     });
@@ -627,6 +676,45 @@ def render_browser_page() -> str:
       await loadWatchlist();
     }
 
+    async function runRadar() {
+      radarButton.disabled = true;
+      radarButton.textContent = "扫描中";
+      const params = new URLSearchParams({
+        q: radarQuery.value.trim(),
+        min_profit: radarProfit.value.trim() || "0",
+        min_roi: radarRoi.value.trim() || "0",
+        limit: "20"
+      });
+      const response = await fetch(`/api/radar?${params.toString()}`);
+      const payload = await response.json();
+      renderRadar(payload.items || [], payload.warning || "");
+      radarButton.textContent = "扫描";
+      radarButton.disabled = false;
+    }
+
+    function renderRadar(items, warning) {
+      radarCount.textContent = `${items.length} 项`;
+      if (!items.length) {
+        radarResults.innerHTML = `<div class="watch-row"><div><strong>暂无候选</strong><span>${escapeHtml(warning || "降低筛选条件后再试")}</span></div></div>`;
+        return;
+      }
+      radarResults.innerHTML = `
+        <div class="radar-row header">
+          <span>饰品</span><span>买入</span><span>卖出</span><span>利润</span><span>ROI</span>
+        </div>
+        ${items.map((item) => `
+          <div class="radar-row">
+            <span>${escapeHtml(item.market_hash_name)}</span>
+            <span>${escapeHtml(item.buy_price)}</span>
+            <span>${escapeHtml(item.sell_price)}</span>
+            <span>${escapeHtml(item.profit)}</span>
+            <span>${escapeHtml(item.roi)}</span>
+          </div>
+        `).join("")}
+        <div class="warning">${escapeHtml(warning)}</div>
+      `;
+    }
+
     function renderPlatforms(platforms) {
       if (!platforms.length) return "";
       return `
@@ -659,6 +747,7 @@ def render_browser_page() -> str:
     loadSourceStatus();
     runSearch();
     loadWatchlist();
+    runRadar();
   </script>
 </body>
 </html>"""
