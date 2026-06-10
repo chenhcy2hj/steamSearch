@@ -24,21 +24,15 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run SteamSearch lightweight browser UI.")
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", default=DEFAULT_PORT, type=int)
-    parser.add_argument("--no-demo-data", action="store_true")
-    args = parser.parse_args()
-
+def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, no_demo_data: bool = False) -> None:
     context = bootstrap_app()
     item_repository = ItemRepository(context.database)
-    if not args.no_demo_data:
+    if not no_demo_data:
         seed_demo_items_if_empty(item_repository)
 
     steamdt_client = build_steamdt_client(context)
-    server = build_server(args.host, args.port, context, item_repository, steamdt_client)
-    print(f"SteamSearch Browser running at http://{args.host}:{args.port}")
+    server = build_server(host, port, context, item_repository, steamdt_client)
+    print(f"SteamSearch Browser running at http://{host}:{port}")
     if steamdt_client is None:
         print("SteamDT live API disabled. Set STEAMDT_API_KEY or config/config.local.toml.")
     else:
@@ -51,6 +45,15 @@ def main() -> None:
     finally:
         context.database.close()
         server.server_close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run SteamSearch lightweight browser UI.")
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--port", default=DEFAULT_PORT, type=int)
+    parser.add_argument("--no-demo-data", action="store_true")
+    args = parser.parse_args()
+    run_server(host=args.host, port=args.port, no_demo_data=args.no_demo_data)
 
 
 def build_server(
