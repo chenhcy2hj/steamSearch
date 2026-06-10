@@ -6,6 +6,18 @@ Current phase: lightweight browser preview with SQLite search and SteamDT live p
 
 ## Run
 
+Recommended:
+
+```bash
+./scripts/start.sh
+./scripts/status.sh
+./scripts/stop.sh
+```
+
+The start script runs SteamSearch in the background, writes runtime files under `run/`, and prints the real URL. If port `8765` is busy, the app automatically falls back to the next available port.
+
+Manual foreground mode:
+
 ```bash
 python3.12 -m app.main
 ```

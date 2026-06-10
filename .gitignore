@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 venv/
 logs/*.log
+run/*.pid
+run/*.url
 data/*.db
 data/*.db-*
 config/config.local.toml
