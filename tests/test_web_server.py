@@ -9,7 +9,9 @@ from app.bootstrap import AppContext
 from app.buff.dto import BuffListingSummary
 from app.storage.db import Database
 from app.storage.migrations import run_migrations
+from app.storage.models import WatchlistInput
 from app.storage.repositories.items import ItemRepository
+from app.storage.repositories.watchlist import WatchlistRepository
 from app.steamdt.dto import SteamDTPlatformPrice
 from app.ui.web_server import build_demo_quote, build_steamdt_quote, seed_demo_items_if_empty
 
@@ -22,6 +24,7 @@ class WebServerTest(unittest.TestCase):
         self.database.connect()
         run_migrations(self.database)
         self.repository = ItemRepository(self.database)
+        self.watchlist = WatchlistRepository(self.database)
         self.context = AppContext(
             settings=AppSettings(
                 steamdt=SteamDTSettings(),
@@ -133,6 +136,17 @@ class WebServerTest(unittest.TestCase):
 
         self.assertTrue(quote["live"])
         self.assertIn("BUFF 增强失败", quote["warning"])
+
+    def test_watchlist_repository_works_with_seeded_items(self) -> None:
+        seed_demo_items_if_empty(self.repository)
+        item = self.repository.search("Empress")[0]
+
+        watchlist_id = self.watchlist.add(WatchlistInput(item_id=item.id))
+
+        records = self.watchlist.list_all()
+
+        self.assertEqual(records[0].id, watchlist_id)
+        self.assertEqual(records[0].market_hash_name, item.market_hash_name)
 
 
 if __name__ == "__main__":

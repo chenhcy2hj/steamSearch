@@ -15,8 +15,9 @@ from app.buff.client import BuffClient
 from app.buff.dto import BuffListingSummary
 from app.buff.service import BuffService
 from app.market.calculator import ProfitCalculator, quantize_money, quantize_percent
-from app.storage.models import ItemAliasInput, ItemInput, ItemRecord
+from app.storage.models import ItemAliasInput, ItemInput, ItemRecord, WatchlistInput, WatchlistRecord
 from app.storage.repositories.items import ItemRepository
+from app.storage.repositories.watchlist import WatchlistRepository
 from app.steamdt.client import SteamDTClient
 from app.steamdt.dto import SteamDTPlatformPrice
 from app.steamdt.service import SteamDTService
@@ -30,12 +31,21 @@ DEFAULT_PORT = 8765
 def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, no_demo_data: bool = False) -> None:
     context = bootstrap_app()
     item_repository = ItemRepository(context.database)
+    watchlist_repository = WatchlistRepository(context.database)
     if not no_demo_data:
         seed_demo_items_if_empty(item_repository)
 
     steamdt_client = build_steamdt_client(context)
     buff_service = build_buff_service(context)
-    server = build_server(host, port, context, item_repository, steamdt_client, buff_service)
+    server = build_server(
+        host,
+        port,
+        context,
+        item_repository,
+        watchlist_repository,
+        steamdt_client,
+        buff_service,
+    )
     print(f"SteamSearch Browser running at http://{host}:{port}")
     if steamdt_client is None:
         print("SteamDT live API disabled. Set STEAMDT_API_KEY or config/config.local.toml.")
@@ -69,12 +79,14 @@ def build_server(
     port: int,
     context: AppContext,
     item_repository: ItemRepository,
+    watchlist_repository: WatchlistRepository,
     steamdt_client: SteamDTClient | None = None,
     buff_service: BuffService | None = None,
 ) -> HTTPServer:
     class SteamSearchHandler(BrowserRequestHandler):
         app_context = context
         repository = item_repository
+        watchlist = watchlist_repository
         steamdt = steamdt_client
         buff = buff_service
 
@@ -84,6 +96,7 @@ def build_server(
 class BrowserRequestHandler(BaseHTTPRequestHandler):
     app_context: AppContext
     repository: ItemRepository
+    watchlist: WatchlistRepository
     steamdt: SteamDTClient | None
     buff: BuffService | None
 
@@ -114,8 +127,30 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if parsed.path == "/api/watchlist":
+            self._handle_list_watchlist()
+            return
         if parsed.path == "/health":
             self._send_json({"ok": True})
+            return
+        self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/watchlist":
+            self._handle_add_watchlist()
+            return
+        if parsed.path.startswith("/api/watchlist/") and parsed.path.endswith("/toggle"):
+            watchlist_id = _parse_path_id(parsed.path, prefix="/api/watchlist/", suffix="/toggle")
+            self._handle_toggle_watchlist(watchlist_id)
+            return
+        self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/watchlist/"):
+            watchlist_id = _parse_path_id(parsed.path, prefix="/api/watchlist/", suffix="")
+            self._handle_delete_watchlist(watchlist_id)
             return
         self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -152,6 +187,47 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(build_steamdt_quote(item, prices, self.app_context.settings.market, self._fetch_buff(item)))
+
+    def _handle_list_watchlist(self) -> None:
+        self._send_json({"items": [_watchlist_to_json(item) for item in self.watchlist.list_all()]})
+
+    def _handle_add_watchlist(self) -> None:
+        payload = self._read_json_body()
+        market_hash_name = str(payload.get("market_hash_name") or "")
+        item = self.repository.get_by_market_hash_name(market_hash_name)
+        if item is None:
+            self._send_json({"error": "item not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        watchlist_id = self.watchlist.add(
+            WatchlistInput(
+                item_id=item.id,
+                target_buy_price=_optional_float(payload.get("target_buy_price")),
+                target_roi=_optional_float(payload.get("target_roi")),
+                note=_optional_string(payload.get("note")),
+            )
+        )
+        self._send_json({"id": watchlist_id}, status=HTTPStatus.CREATED)
+
+    def _handle_toggle_watchlist(self, watchlist_id: int | None) -> None:
+        if watchlist_id is None:
+            self._send_json({"error": "invalid watchlist id"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        payload = self._read_json_body()
+        enabled = bool(payload.get("enabled", True))
+        if not self.watchlist.set_enabled(watchlist_id, enabled):
+            self._send_json({"error": "watchlist item not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        self._send_json({"id": watchlist_id, "enabled": enabled})
+
+    def _handle_delete_watchlist(self, watchlist_id: int | None) -> None:
+        if watchlist_id is None:
+            self._send_json({"error": "invalid watchlist id"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not self.watchlist.delete(watchlist_id):
+            self._send_json({"error": "watchlist item not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        self._send_json({"id": watchlist_id, "deleted": True})
 
     def _fetch_buff(self, item: ItemRecord) -> BuffListingSummary | Exception | None:
         if self.buff is None:
@@ -190,6 +266,19 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
         self.wfile.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+    def _read_json_body(self) -> dict[str, Any]:
+        content_length = int(self.headers.get("Content-Length") or "0")
+        if content_length <= 0:
+            return {}
+        raw = self.rfile.read(content_length).decode("utf-8")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return payload
 
 
 def seed_demo_items_if_empty(repository: ItemRepository) -> None:
@@ -446,6 +535,10 @@ def _item_to_json(item: ItemRecord) -> dict[str, Any]:
     return asdict(item)
 
 
+def _watchlist_to_json(item: WatchlistRecord) -> dict[str, Any]:
+    return asdict(item)
+
+
 def _money(value: Decimal) -> str:
     return f"¥{quantize_money(Decimal(str(value)))}"
 
@@ -466,6 +559,36 @@ def _parse_int(value: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _parse_path_id(path: str, prefix: str, suffix: str) -> int | None:
+    if not path.startswith(prefix):
+        return None
+    value = path[len(prefix) :]
+    if suffix:
+        if not value.endswith(suffix):
+            return None
+        value = value[: -len(suffix)]
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 if __name__ == "__main__":

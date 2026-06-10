@@ -323,12 +323,57 @@ def render_browser_page() -> str:
       font-weight: 700;
     }
 
+    .stack {
+      display: grid;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .watchlist {
+      display: grid;
+    }
+
+    .watch-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 10px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      align-items: center;
+    }
+
+    .watch-row:last-child { border-bottom: 0; }
+
+    .watch-row strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .watch-row span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 3px;
+    }
+
+    .icon-button {
+      width: 34px;
+      height: 30px;
+      padding: 0;
+      font-size: 12px;
+      background: #eef2f5;
+      color: var(--text);
+      border: 1px solid var(--line);
+    }
+
     @media (max-width: 880px) {
       .shell { grid-template-columns: 1fr; }
       aside { padding: 14px; }
       .nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .grid,
       .prices { grid-template-columns: 1fr; }
+      .watch-row { grid-template-columns: 1fr auto; }
       .platform-row { grid-template-columns: 1fr 1fr; }
       .top { align-items: stretch; flex-direction: column; }
       .status { justify-content: flex-start; }
@@ -393,6 +438,15 @@ def render_browser_page() -> str:
           </div>
         </section>
       </div>
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>监控列表</h2>
+            <span class="pill blue" id="watchCount">0 项</span>
+          </div>
+          <div class="watchlist" id="watchlist"></div>
+        </section>
+      </div>
     </main>
   </div>
   <script>
@@ -405,6 +459,9 @@ def render_browser_page() -> str:
     const quoteState = document.getElementById("quoteState");
     const steamdtState = document.getElementById("steamdtState");
     const buffState = document.getElementById("buffState");
+    const watchlist = document.getElementById("watchlist");
+    const watchCount = document.getElementById("watchCount");
+    let activeMarketHashName = "";
 
     searchButton.addEventListener("click", runSearch);
     syncButton.addEventListener("click", syncSteamDTBase);
@@ -441,6 +498,8 @@ def render_browser_page() -> str:
       renderResults(payload.items || []);
       if (payload.items && payload.items.length > 0) {
         await loadQuote(payload.items[0].market_hash_name);
+      } else {
+        activeMarketHashName = "";
       }
     }
 
@@ -464,6 +523,7 @@ def render_browser_page() -> str:
     }
 
     async function loadQuote(marketHashName) {
+      activeMarketHashName = marketHashName;
       quoteState.textContent = "加载中";
       const response = await fetch(`/api/quote?market_hash_name=${encodeURIComponent(marketHashName)}`);
       const payload = await response.json();
@@ -487,7 +547,10 @@ def render_browser_page() -> str:
         <div class="skin">
           <h3>${escapeHtml(payload.item.market_hash_name)}</h3>
           <p>${escapeHtml(payload.item.name_cn || "-")} · ${escapeHtml(payload.item.category || "未分类")} · ${escapeHtml(payload.item.rarity || "-")}</p>
-          <div><span class="pill green">ROI ${escapeHtml(profit.roi)}</span></div>
+          <div>
+            <span class="pill green">ROI ${escapeHtml(profit.roi)}</span>
+            <button class="small-button" onclick="addActiveToWatchlist()">加入监控</button>
+          </div>
         </div>
         <div class="prices">
           <div class="price">
@@ -509,6 +572,59 @@ def render_browser_page() -> str:
         ${renderPlatforms(platforms)}
         <div class="warning">${escapeHtml(errorMessage || payload.warning)}</div>
       `;
+    }
+
+    async function addActiveToWatchlist() {
+      if (!activeMarketHashName) return;
+      const response = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ market_hash_name: activeMarketHashName })
+      });
+      if (!response.ok) {
+        const payload = await response.json();
+        alert(payload.error || "加入监控失败");
+        return;
+      }
+      await loadWatchlist();
+    }
+
+    async function loadWatchlist() {
+      const response = await fetch("/api/watchlist");
+      const payload = await response.json();
+      renderWatchlist(payload.items || []);
+    }
+
+    function renderWatchlist(items) {
+      watchCount.textContent = `${items.length} 项`;
+      if (!items.length) {
+        watchlist.innerHTML = `<div class="watch-row"><div><strong>暂无监控项</strong><span>从价格详情中加入一个饰品</span></div></div>`;
+        return;
+      }
+      watchlist.innerHTML = items.map((item) => `
+        <div class="watch-row">
+          <div>
+            <strong>${escapeHtml(item.market_hash_name)}</strong>
+            <span>${escapeHtml(item.name_cn || "-")} · ${item.enabled ? "已启用" : "已停用"}</span>
+          </div>
+          <button class="icon-button" title="启停" onclick="toggleWatch(${item.id}, ${item.enabled ? "false" : "true"})">${item.enabled ? "停" : "启"}</button>
+          <button class="icon-button" title="删除" onclick="deleteWatch(${item.id})">删</button>
+        </div>
+      `).join("");
+    }
+
+    async function toggleWatch(id, enabled) {
+      await fetch(`/api/watchlist/${id}/toggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled })
+      });
+      await loadWatchlist();
+    }
+
+    async function deleteWatch(id) {
+      await fetch(`/api/watchlist/${id}`, { method: "DELETE" });
+      await loadWatchlist();
     }
 
     function renderPlatforms(platforms) {
@@ -542,6 +658,7 @@ def render_browser_page() -> str:
 
     loadSourceStatus();
     runSearch();
+    loadWatchlist();
   </script>
 </body>
 </html>"""

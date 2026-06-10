@@ -36,3 +36,25 @@ class ItemRecord:
     tradable: bool
     updated_at: str
 
+
+@dataclass(frozen=True)
+class WatchlistInput:
+    item_id: int
+    target_buy_price: float | None = None
+    target_roi: float | None = None
+    enabled: bool = True
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class WatchlistRecord:
+    id: int
+    item_id: int
+    market_hash_name: str
+    name_cn: str | None
+    target_buy_price: float | None
+    target_roi: float | None
+    enabled: bool
+    note: str | None
+    created_at: str
+    updated_at: str
