@@ -33,6 +33,20 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(settings.steamdt.api_key, "env-key")
         self.assertEqual(settings.steamdt.base_url, "https://env.example")
 
+    def test_buff_environment_enables_cookie(self) -> None:
+        old_enabled = os.environ.get("BUFF_ENABLED")
+        old_cookie = os.environ.get("BUFF_COOKIE")
+        os.environ["BUFF_ENABLED"] = "true"
+        os.environ["BUFF_COOKIE"] = "buff-cookie"
+        try:
+            settings, _ = load_settings(Path("/tmp/missing-steamsearch-config.toml"))
+        finally:
+            _restore_env("BUFF_ENABLED", old_enabled)
+            _restore_env("BUFF_COOKIE", old_cookie)
+
+        self.assertTrue(settings.buff.enabled)
+        self.assertEqual(settings.buff.cookie, "buff-cookie")
+
 
 def _restore_env(key: str, value: str | None) -> None:
     if value is None:

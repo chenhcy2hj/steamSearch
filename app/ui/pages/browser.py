@@ -361,6 +361,7 @@ def render_browser_page() -> str:
         <div class="status">
           <span class="pill green">SQLite 已连接</span>
           <span class="pill blue" id="steamdtState">SteamDT 检查中</span>
+          <span class="pill blue" id="buffState">BUFF 检查中</span>
           <span class="pill blue">FTS 搜索</span>
         </div>
       </div>
@@ -403,6 +404,7 @@ def render_browser_page() -> str:
     const detail = document.getElementById("detail");
     const quoteState = document.getElementById("quoteState");
     const steamdtState = document.getElementById("steamdtState");
+    const buffState = document.getElementById("buffState");
 
     searchButton.addEventListener("click", runSearch);
     syncButton.addEventListener("click", syncSteamDTBase);
@@ -414,6 +416,7 @@ def render_browser_page() -> str:
       const response = await fetch("/api/source-status");
       const payload = await response.json();
       steamdtState.textContent = payload.steamdt.enabled ? "SteamDT 已启用" : "SteamDT 未配置";
+      buffState.textContent = payload.buff.enabled ? "BUFF 已启用" : "BUFF 未启用";
     }
 
     async function syncSteamDTBase() {

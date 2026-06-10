@@ -140,3 +140,12 @@ def _apply_environment_overrides(raw: Dict[str, Dict[str, Any]]) -> None:
     steamdt_base_url = os.environ.get("STEAMDT_BASE_URL")
     if steamdt_base_url:
         raw.setdefault("steamdt", {})["base_url"] = steamdt_base_url
+
+    buff_cookie = os.environ.get("BUFF_COOKIE")
+    if buff_cookie:
+        raw.setdefault("buff", {})["cookie"] = buff_cookie
+        raw.setdefault("buff", {})["enabled"] = True
+
+    buff_enabled = os.environ.get("BUFF_ENABLED")
+    if buff_enabled:
+        raw.setdefault("buff", {})["enabled"] = buff_enabled.lower() in {"1", "true", "yes", "on"}

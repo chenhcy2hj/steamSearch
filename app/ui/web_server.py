@@ -11,6 +11,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from app.bootstrap import AppContext, bootstrap_app
+from app.buff.client import BuffClient
+from app.buff.dto import BuffListingSummary
+from app.buff.service import BuffService
 from app.market.calculator import ProfitCalculator, quantize_money, quantize_percent
 from app.storage.models import ItemAliasInput, ItemInput, ItemRecord
 from app.storage.repositories.items import ItemRepository
@@ -31,12 +34,17 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, no_demo_data:
         seed_demo_items_if_empty(item_repository)
 
     steamdt_client = build_steamdt_client(context)
-    server = build_server(host, port, context, item_repository, steamdt_client)
+    buff_service = build_buff_service(context)
+    server = build_server(host, port, context, item_repository, steamdt_client, buff_service)
     print(f"SteamSearch Browser running at http://{host}:{port}")
     if steamdt_client is None:
         print("SteamDT live API disabled. Set STEAMDT_API_KEY or config/config.local.toml.")
     else:
         print("SteamDT live API enabled.")
+    if buff_service is None:
+        print("BUFF enhancement disabled. Set BUFF_ENABLED=true and BUFF_COOKIE to enable it.")
+    else:
+        print("BUFF enhancement enabled.")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
@@ -62,11 +70,13 @@ def build_server(
     context: AppContext,
     item_repository: ItemRepository,
     steamdt_client: SteamDTClient | None = None,
+    buff_service: BuffService | None = None,
 ) -> HTTPServer:
     class SteamSearchHandler(BrowserRequestHandler):
         app_context = context
         repository = item_repository
         steamdt = steamdt_client
+        buff = buff_service
 
     return HTTPServer((host, port), SteamSearchHandler)
 
@@ -75,6 +85,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
     app_context: AppContext
     repository: ItemRepository
     steamdt: SteamDTClient | None
+    buff: BuffService | None
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -96,7 +107,10 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                     "steamdt": {
                         "enabled": self.steamdt is not None,
                         "base_url": self.app_context.settings.steamdt.base_url,
-                    }
+                    },
+                    "buff": {
+                        "enabled": self.buff is not None,
+                    },
                 }
             )
             return
@@ -121,7 +135,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "item not found"}, status=HTTPStatus.NOT_FOUND)
             return
         if self.steamdt is None:
-            self._send_json(build_demo_quote(item, self.app_context.settings.market))
+            self._send_json(build_demo_quote(item, self.app_context.settings.market, self._fetch_buff(item)))
             return
 
         try:
@@ -131,13 +145,21 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
                 {
                     "error": "SteamDT request failed",
                     "detail": str(error),
-                    "fallback": build_demo_quote(item, self.app_context.settings.market),
+                    "fallback": build_demo_quote(item, self.app_context.settings.market, self._fetch_buff(item)),
                 },
                 status=HTTPStatus.BAD_GATEWAY,
             )
             return
 
-        self._send_json(build_steamdt_quote(item, prices, self.app_context.settings.market))
+        self._send_json(build_steamdt_quote(item, prices, self.app_context.settings.market, self._fetch_buff(item)))
+
+    def _fetch_buff(self, item: ItemRecord) -> BuffListingSummary | Exception | None:
+        if self.buff is None:
+            return None
+        try:
+            return asyncio.run(self.buff.fetch_listing_summary(item.market_hash_name))
+        except Exception as error:
+            return error
 
     def _handle_sync_steamdt_base(self) -> None:
         if self.steamdt is None:
@@ -218,19 +240,34 @@ def build_steamdt_client(context: AppContext) -> SteamDTClient | None:
     return SteamDTClient(api_key=api_key, base_url=context.settings.steamdt.base_url)
 
 
+def build_buff_service(context: AppContext) -> BuffService | None:
+    if not context.settings.buff.enabled:
+        return None
+    cookie = context.settings.buff.cookie.strip()
+    if not cookie:
+        return None
+    return BuffService(
+        BuffClient(cookie=cookie),
+        min_interval_seconds=context.settings.buff.min_interval_seconds,
+        cache_ttl_seconds=context.settings.buff.cache_ttl_seconds,
+    )
+
+
 def build_steamdt_quote(
     item: ItemRecord,
     prices: list[SteamDTPlatformPrice],
     market_settings: Any,
+    buff_summary: BuffListingSummary | Exception | None = None,
 ) -> dict[str, Any]:
     positive_prices = [price for price in prices if price.sell_price > 0]
-    buy_price = _lowest_price(positive_prices)
+    steamdt_buy_price = _lowest_price(positive_prices)
     sell_price = _steam_sell_price(positive_prices) or _highest_price(positive_prices)
+    buy_price = _quote_buy_price(steamdt_buy_price, buff_summary)
     profit = None
 
     if buy_price is not None and sell_price is not None:
         result = ProfitCalculator().calculate(
-            buy_price.sell_price,
+            buy_price["amount"],
             sell_price.sell_price,
             steam_fee_rate=Decimal(str(market_settings.steam_fee_rate)),
             wallet_discount_rate=Decimal(str(market_settings.wallet_discount_rate)),
@@ -246,20 +283,26 @@ def build_steamdt_quote(
     return {
         "item": _item_to_json(item),
         "sources": {
-            "buy": _source_json(buy_price, "SteamDT 最低挂单"),
+            "buy": _buy_source_json(buy_price),
             "sell": _source_json(sell_price, "SteamDT 卖出估算"),
         },
         "profit": profit,
         "platform_prices": [_platform_price_json(price) for price in positive_prices],
-        "warning": "当前价格来自 SteamDT 实时接口；利润为按配置手续费计算的估算值。",
+        "warning": _quote_warning("SteamDT", buff_summary),
         "live": True,
     }
 
 
-def build_demo_quote(item: ItemRecord, market_settings: Any) -> dict[str, Any]:
-    buy_price, sell_price = _demo_prices(item)
+def build_demo_quote(
+    item: ItemRecord,
+    market_settings: Any,
+    buff_summary: BuffListingSummary | Exception | None = None,
+) -> dict[str, Any]:
+    demo_buy_price, sell_price = _demo_prices(item)
+    buy_price = _quote_buy_price(None, buff_summary)
+    raw_buy_price = buy_price["amount"] if buy_price is not None else demo_buy_price
     result = ProfitCalculator().calculate(
-        buy_price,
+        raw_buy_price,
         sell_price,
         steam_fee_rate=Decimal(str(market_settings.steam_fee_rate)),
         wallet_discount_rate=Decimal(str(market_settings.wallet_discount_rate)),
@@ -277,11 +320,14 @@ def build_demo_quote(item: ItemRecord, market_settings: Any) -> dict[str, Any]:
     return {
         "item": _item_to_json(item),
         "sources": {
-            "buy": {
-                "name": "BUFF 演示价",
-                "price": _money(buy_price),
-                "freshness": "本地演示数据",
-            },
+            "buy": _buy_source_json(
+                buy_price
+                or {
+                    "name": "BUFF 演示价",
+                    "amount": demo_buy_price,
+                    "freshness": "本地演示数据",
+                }
+            ),
             "sell": {
                 "name": "SteamDT 演示价",
                 "price": _money(sell_price),
@@ -290,9 +336,56 @@ def build_demo_quote(item: ItemRecord, market_settings: Any) -> dict[str, Any]:
         },
         "profit": profit,
         "platform_prices": [],
-        "warning": "当前为本地演示报价；接入真实 SteamDT/Buff 数据后会替换。",
+        "warning": _quote_warning("演示数据", buff_summary),
         "live": False,
     }
+
+
+def _quote_buy_price(
+    steamdt_price: SteamDTPlatformPrice | None,
+    buff_summary: BuffListingSummary | Exception | None,
+) -> dict[str, Any] | None:
+    if isinstance(buff_summary, BuffListingSummary):
+        return {
+            "name": "BUFF 实时最低挂单",
+            "amount": buff_summary.lowest_price,
+            "freshness": _buff_freshness(buff_summary),
+        }
+    if steamdt_price is None:
+        return None
+    return {
+        "name": f"{steamdt_price.platform} · SteamDT 最低挂单",
+        "amount": steamdt_price.sell_price,
+        "freshness": f"在售 {steamdt_price.sell_count} 件",
+    }
+
+
+def _buy_source_json(price: dict[str, Any] | None) -> dict[str, str]:
+    if price is None:
+        return {
+            "name": "买入价",
+            "price": "-",
+            "freshness": "暂无数据",
+        }
+    return {
+        "name": str(price["name"]),
+        "price": _money(price["amount"]),
+        "freshness": str(price["freshness"]),
+    }
+
+
+def _buff_freshness(summary: BuffListingSummary) -> str:
+    if summary.sell_count is None:
+        return "BUFF 当前挂单"
+    return f"BUFF 在售 {summary.sell_count} 件"
+
+
+def _quote_warning(source_name: str, buff_summary: BuffListingSummary | Exception | None) -> str:
+    if isinstance(buff_summary, Exception):
+        return f"{source_name} 已返回；BUFF 增强失败：{buff_summary}"
+    if isinstance(buff_summary, BuffListingSummary):
+        return f"{source_name} 已返回；买入价使用 BUFF 实时最低挂单。"
+    return f"当前价格来自 {source_name}；未启用 BUFF 增强。"
 
 
 def _lowest_price(prices: list[SteamDTPlatformPrice]) -> SteamDTPlatformPrice | None:

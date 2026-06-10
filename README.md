@@ -39,6 +39,13 @@ Or use an environment variable:
 export STEAMDT_API_KEY="your-api-key"
 ```
 
+Enable BUFF single-item enhancement when you have a logged-in BUFF cookie:
+
+```bash
+export BUFF_ENABLED=true
+export BUFF_COOKIE="your-buff-cookie"
+```
+
 ```bash
 python3.12 -m app.ui.web_server
 ```

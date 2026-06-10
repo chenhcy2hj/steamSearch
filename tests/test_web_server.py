@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.core.config import AppSettings, BuffSettings, MarketSettings, RuntimeSettings, SteamDTSettings
 from app.bootstrap import AppContext
+from app.buff.dto import BuffListingSummary
 from app.storage.db import Database
 from app.storage.migrations import run_migrations
 from app.storage.repositories.items import ItemRepository
@@ -55,6 +56,25 @@ class WebServerTest(unittest.TestCase):
         self.assertIn("¥", quote["profit"]["profit"])
         self.assertIn("%", quote["profit"]["roi"])
 
+    def test_build_demo_quote_uses_buff_price_when_available(self) -> None:
+        seed_demo_items_if_empty(self.repository)
+        item = self.repository.search("Empress")[0]
+
+        quote = build_demo_quote(
+            item,
+            self.context.settings.market,
+            BuffListingSummary(
+                goods_id="buff-1",
+                market_hash_name=item.market_hash_name,
+                lowest_price=100,
+                sell_count=7,
+            ),
+        )
+
+        self.assertEqual(quote["sources"]["buy"]["name"], "BUFF 实时最低挂单")
+        self.assertEqual(quote["sources"]["buy"]["price"], "¥100.00")
+        self.assertIn("BUFF", quote["warning"])
+
     def test_build_steamdt_quote_contains_platform_prices(self) -> None:
         seed_demo_items_if_empty(self.repository)
         item = self.repository.search("Empress")[0]
@@ -89,6 +109,30 @@ class WebServerTest(unittest.TestCase):
         self.assertEqual(quote["sources"]["sell"]["price"], "¥150.00")
         self.assertEqual(quote["platform_prices"][0]["platform"], "buff")
         self.assertIn("%", quote["profit"]["roi"])
+
+    def test_build_steamdt_quote_keeps_result_when_buff_fails(self) -> None:
+        seed_demo_items_if_empty(self.repository)
+        item = self.repository.search("Empress")[0]
+
+        quote = build_steamdt_quote(
+            item,
+            [
+                SteamDTPlatformPrice(
+                    platform="steam",
+                    platform_item_id="steam-1",
+                    sell_price=150,
+                    sell_count=5,
+                    bidding_price=130,
+                    bidding_count=2,
+                    update_time=1710000001,
+                )
+            ],
+            self.context.settings.market,
+            RuntimeError("cookie invalid"),
+        )
+
+        self.assertTrue(quote["live"])
+        self.assertIn("BUFF 增强失败", quote["warning"])
 
 
 if __name__ == "__main__":
