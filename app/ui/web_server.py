@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import socket
 from dataclasses import asdict
 from decimal import Decimal
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from app.bootstrap import AppContext, bootstrap_app
@@ -26,6 +27,7 @@ from app.ui.pages.browser import render_browser_page
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+PORT_FALLBACK_ATTEMPTS = 20
 
 
 def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, no_demo_data: bool = False) -> None:
@@ -37,16 +39,19 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, no_demo_data:
 
     steamdt_client = build_steamdt_client(context)
     buff_service = build_buff_service(context)
+    selected_port = find_available_port(host, port)
+    if selected_port != port:
+        print(f"Port {port} is already in use. Using {selected_port} instead.")
     server = build_server(
         host,
-        port,
+        selected_port,
         context,
         item_repository,
         watchlist_repository,
         steamdt_client,
         buff_service,
     )
-    print(f"SteamSearch Browser running at http://{host}:{port}")
+    print(f"SteamSearch Browser running at http://{host}:{selected_port}")
     if steamdt_client is None:
         print("SteamDT live API disabled. Set STEAMDT_API_KEY or config/config.local.toml.")
     else:
@@ -91,6 +96,29 @@ def build_server(
         buff = buff_service
 
     return HTTPServer((host, port), SteamSearchHandler)
+
+
+def find_available_port(
+    host: str,
+    start_port: int,
+    max_attempts: int = PORT_FALLBACK_ATTEMPTS,
+    port_checker: Callable[[str, int], bool] | None = None,
+) -> int:
+    checker = port_checker or is_port_available
+    for port in range(start_port, start_port + max_attempts):
+        if checker(host, port):
+            return port
+    raise OSError(f"No available port found from {start_port} to {start_port + max_attempts - 1}")
+
+
+def is_port_available(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError:
+            return False
+    return True
 
 
 class BrowserRequestHandler(BaseHTTPRequestHandler):

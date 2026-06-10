@@ -13,7 +13,12 @@ from app.storage.models import WatchlistInput
 from app.storage.repositories.items import ItemRepository
 from app.storage.repositories.watchlist import WatchlistRepository
 from app.steamdt.dto import SteamDTPlatformPrice
-from app.ui.web_server import build_demo_quote, build_steamdt_quote, seed_demo_items_if_empty
+from app.ui.web_server import (
+    build_demo_quote,
+    build_steamdt_quote,
+    find_available_port,
+    seed_demo_items_if_empty,
+)
 
 
 class WebServerTest(unittest.TestCase):
@@ -147,6 +152,14 @@ class WebServerTest(unittest.TestCase):
 
         self.assertEqual(records[0].id, watchlist_id)
         self.assertEqual(records[0].market_hash_name, item.market_hash_name)
+
+    def test_find_available_port_skips_busy_port(self) -> None:
+        def fake_checker(host: str, port: int) -> bool:
+            return port != 8765
+
+        selected = find_available_port("127.0.0.1", 8765, max_attempts=3, port_checker=fake_checker)
+
+        self.assertEqual(selected, 8766)
 
 
 if __name__ == "__main__":
