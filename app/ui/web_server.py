@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from dataclasses import asdict
 from decimal import Decimal
@@ -13,6 +14,9 @@ from app.bootstrap import AppContext, bootstrap_app
 from app.market.calculator import ProfitCalculator, quantize_money, quantize_percent
 from app.storage.models import ItemAliasInput, ItemInput, ItemRecord
 from app.storage.repositories.items import ItemRepository
+from app.steamdt.client import SteamDTClient
+from app.steamdt.dto import SteamDTPlatformPrice
+from app.steamdt.service import SteamDTService
 from app.ui.pages.browser import render_browser_page
 
 
@@ -32,8 +36,13 @@ def main() -> None:
     if not args.no_demo_data:
         seed_demo_items_if_empty(item_repository)
 
-    server = build_server(args.host, args.port, context, item_repository)
+    steamdt_client = build_steamdt_client(context)
+    server = build_server(args.host, args.port, context, item_repository, steamdt_client)
     print(f"SteamSearch Browser running at http://{args.host}:{args.port}")
+    if steamdt_client is None:
+        print("SteamDT live API disabled. Set STEAMDT_API_KEY or config/config.local.toml.")
+    else:
+        print("SteamDT live API enabled.")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
@@ -49,10 +58,12 @@ def build_server(
     port: int,
     context: AppContext,
     item_repository: ItemRepository,
+    steamdt_client: SteamDTClient | None = None,
 ) -> HTTPServer:
     class SteamSearchHandler(BrowserRequestHandler):
         app_context = context
         repository = item_repository
+        steamdt = steamdt_client
 
     return HTTPServer((host, port), SteamSearchHandler)
 
@@ -60,6 +71,7 @@ def build_server(
 class BrowserRequestHandler(BaseHTTPRequestHandler):
     app_context: AppContext
     repository: ItemRepository
+    steamdt: SteamDTClient | None
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -71,6 +83,19 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/quote":
             self._handle_quote(parse_qs(parsed.query))
+            return
+        if parsed.path == "/api/sync/steamdt/base":
+            self._handle_sync_steamdt_base()
+            return
+        if parsed.path == "/api/source-status":
+            self._send_json(
+                {
+                    "steamdt": {
+                        "enabled": self.steamdt is not None,
+                        "base_url": self.app_context.settings.steamdt.base_url,
+                    }
+                }
+            )
             return
         if parsed.path == "/health":
             self._send_json({"ok": True})
@@ -92,7 +117,42 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         if item is None:
             self._send_json({"error": "item not found"}, status=HTTPStatus.NOT_FOUND)
             return
-        self._send_json(build_demo_quote(item, self.app_context.settings.market))
+        if self.steamdt is None:
+            self._send_json(build_demo_quote(item, self.app_context.settings.market))
+            return
+
+        try:
+            prices = asyncio.run(self.steamdt.fetch_single_price(item.market_hash_name))
+        except Exception as error:
+            self._send_json(
+                {
+                    "error": "SteamDT request failed",
+                    "detail": str(error),
+                    "fallback": build_demo_quote(item, self.app_context.settings.market),
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
+            return
+
+        self._send_json(build_steamdt_quote(item, prices, self.app_context.settings.market))
+
+    def _handle_sync_steamdt_base(self) -> None:
+        if self.steamdt is None:
+            self._send_json(
+                {"error": "SteamDT API Key is not configured"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            service = SteamDTService(self.steamdt, self.repository)
+            count = asyncio.run(service.sync_base_items())
+        except Exception as error:
+            self._send_json(
+                {"error": "SteamDT base sync failed", "detail": str(error)},
+                status=HTTPStatus.BAD_GATEWAY,
+            )
+            return
+        self._send_json({"synced": count, "total": self.repository.count()})
 
     def _send_html(self, content: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_response(status)
@@ -148,6 +208,51 @@ def seed_demo_items_if_empty(repository: ItemRepository) -> None:
     )
 
 
+def build_steamdt_client(context: AppContext) -> SteamDTClient | None:
+    api_key = context.settings.steamdt.api_key.strip()
+    if not api_key:
+        return None
+    return SteamDTClient(api_key=api_key, base_url=context.settings.steamdt.base_url)
+
+
+def build_steamdt_quote(
+    item: ItemRecord,
+    prices: list[SteamDTPlatformPrice],
+    market_settings: Any,
+) -> dict[str, Any]:
+    positive_prices = [price for price in prices if price.sell_price > 0]
+    buy_price = _lowest_price(positive_prices)
+    sell_price = _steam_sell_price(positive_prices) or _highest_price(positive_prices)
+    profit = None
+
+    if buy_price is not None and sell_price is not None:
+        result = ProfitCalculator().calculate(
+            buy_price.sell_price,
+            sell_price.sell_price,
+            steam_fee_rate=Decimal(str(market_settings.steam_fee_rate)),
+            wallet_discount_rate=Decimal(str(market_settings.wallet_discount_rate)),
+        )
+        if result is not None:
+            profit = {
+                "net_sell_price": _money(result.net_sell_price),
+                "profit": _money(result.profit),
+                "roi": _percent(result.roi),
+                "spread": _percent(result.spread),
+            }
+
+    return {
+        "item": _item_to_json(item),
+        "sources": {
+            "buy": _source_json(buy_price, "SteamDT 最低挂单"),
+            "sell": _source_json(sell_price, "SteamDT 卖出估算"),
+        },
+        "profit": profit,
+        "platform_prices": [_platform_price_json(price) for price in positive_prices],
+        "warning": "当前价格来自 SteamDT 实时接口；利润为按配置手续费计算的估算值。",
+        "live": True,
+    }
+
+
 def build_demo_quote(item: ItemRecord, market_settings: Any) -> dict[str, Any]:
     buy_price, sell_price = _demo_prices(item)
     result = ProfitCalculator().calculate(
@@ -181,7 +286,52 @@ def build_demo_quote(item: ItemRecord, market_settings: Any) -> dict[str, Any]:
             },
         },
         "profit": profit,
+        "platform_prices": [],
         "warning": "当前为本地演示报价；接入真实 SteamDT/Buff 数据后会替换。",
+        "live": False,
+    }
+
+
+def _lowest_price(prices: list[SteamDTPlatformPrice]) -> SteamDTPlatformPrice | None:
+    if not prices:
+        return None
+    return min(prices, key=lambda price: price.sell_price)
+
+
+def _highest_price(prices: list[SteamDTPlatformPrice]) -> SteamDTPlatformPrice | None:
+    if not prices:
+        return None
+    return max(prices, key=lambda price: price.sell_price)
+
+
+def _steam_sell_price(prices: list[SteamDTPlatformPrice]) -> SteamDTPlatformPrice | None:
+    steam_prices = [price for price in prices if "steam" in price.platform.lower()]
+    return _highest_price(steam_prices)
+
+
+def _source_json(price: SteamDTPlatformPrice | None, fallback_name: str) -> dict[str, str]:
+    if price is None:
+        return {
+            "name": fallback_name,
+            "price": "-",
+            "freshness": "暂无数据",
+        }
+    return {
+        "name": f"{price.platform} · {fallback_name}",
+        "price": _money(price.sell_price),
+        "freshness": f"在售 {price.sell_count} 件",
+    }
+
+
+def _platform_price_json(price: SteamDTPlatformPrice) -> dict[str, Any]:
+    return {
+        "platform": price.platform,
+        "platform_item_id": price.platform_item_id,
+        "sell_price": _money(price.sell_price),
+        "sell_count": price.sell_count,
+        "bidding_price": _money(price.bidding_price),
+        "bidding_count": price.bidding_count,
+        "update_time": price.update_time,
     }
 
 
@@ -201,11 +351,11 @@ def _item_to_json(item: ItemRecord) -> dict[str, Any]:
 
 
 def _money(value: Decimal) -> str:
-    return f"¥{quantize_money(value)}"
+    return f"¥{quantize_money(Decimal(str(value)))}"
 
 
 def _percent(value: Decimal) -> str:
-    return f"{quantize_percent(value)}%"
+    return f"{quantize_percent(Decimal(str(value)))}%"
 
 
 def _first(query: dict[str, list[str]], key: str, default: str) -> str:

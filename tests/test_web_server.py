@@ -9,7 +9,8 @@ from app.bootstrap import AppContext
 from app.storage.db import Database
 from app.storage.migrations import run_migrations
 from app.storage.repositories.items import ItemRepository
-from app.ui.web_server import build_demo_quote, seed_demo_items_if_empty
+from app.steamdt.dto import SteamDTPlatformPrice
+from app.ui.web_server import build_demo_quote, build_steamdt_quote, seed_demo_items_if_empty
 
 
 class WebServerTest(unittest.TestCase):
@@ -54,7 +55,41 @@ class WebServerTest(unittest.TestCase):
         self.assertIn("¥", quote["profit"]["profit"])
         self.assertIn("%", quote["profit"]["roi"])
 
+    def test_build_steamdt_quote_contains_platform_prices(self) -> None:
+        seed_demo_items_if_empty(self.repository)
+        item = self.repository.search("Empress")[0]
+
+        quote = build_steamdt_quote(
+            item,
+            [
+                SteamDTPlatformPrice(
+                    platform="buff",
+                    platform_item_id="buff-1",
+                    sell_price=100,
+                    sell_count=9,
+                    bidding_price=95,
+                    bidding_count=3,
+                    update_time=1710000000,
+                ),
+                SteamDTPlatformPrice(
+                    platform="steam",
+                    platform_item_id="steam-1",
+                    sell_price=150,
+                    sell_count=5,
+                    bidding_price=130,
+                    bidding_count=2,
+                    update_time=1710000001,
+                ),
+            ],
+            self.context.settings.market,
+        )
+
+        self.assertTrue(quote["live"])
+        self.assertEqual(quote["sources"]["buy"]["price"], "¥100.00")
+        self.assertEqual(quote["sources"]["sell"]["price"], "¥150.00")
+        self.assertEqual(quote["platform_prices"][0]["platform"], "buff")
+        self.assertIn("%", quote["profit"]["roi"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

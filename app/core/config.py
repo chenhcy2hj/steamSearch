@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -52,6 +53,7 @@ class AppSettings:
 
 def load_settings(config_path: Path = DEFAULT_CONFIG_PATH) -> Tuple[AppSettings, Path]:
     raw = _load_config_file(config_path)
+    _apply_environment_overrides(raw)
     settings = AppSettings(
         steamdt=SteamDTSettings(**raw.get("steamdt", {})),
         buff=BuffSettings(**raw.get("buff", {})),
@@ -129,3 +131,12 @@ def _parse_scalar(value: str) -> Any:
     except ValueError:
         return value
 
+
+def _apply_environment_overrides(raw: Dict[str, Dict[str, Any]]) -> None:
+    steamdt_api_key = os.environ.get("STEAMDT_API_KEY")
+    if steamdt_api_key:
+        raw.setdefault("steamdt", {})["api_key"] = steamdt_api_key
+
+    steamdt_base_url = os.environ.get("STEAMDT_BASE_URL")
+    if steamdt_base_url:
+        raw.setdefault("steamdt", {})["base_url"] = steamdt_base_url

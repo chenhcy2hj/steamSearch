@@ -195,6 +195,15 @@ def render_browser_page() -> str:
       cursor: pointer;
     }
 
+    .small-button {
+      width: auto;
+      height: 30px;
+      padding: 0 10px;
+      margin-right: 8px;
+      font-size: 12px;
+      background: #2563a9;
+    }
+
     .results {
       display: grid;
       max-height: 560px;
@@ -289,12 +298,38 @@ def render_browser_page() -> str:
       font-size: 13px;
     }
 
+    .platforms {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .platform-row {
+      display: grid;
+      grid-template-columns: minmax(110px, 1fr) 100px 80px 100px 80px;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      align-items: center;
+    }
+
+    .platform-row:last-child { border-bottom: 0; }
+
+    .platform-row.header {
+      color: var(--muted);
+      background: #f7fafc;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
     @media (max-width: 880px) {
       .shell { grid-template-columns: 1fr; }
       aside { padding: 14px; }
       .nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .grid,
       .prices { grid-template-columns: 1fr; }
+      .platform-row { grid-template-columns: 1fr 1fr; }
       .top { align-items: stretch; flex-direction: column; }
       .status { justify-content: flex-start; }
     }
@@ -321,19 +356,22 @@ def render_browser_page() -> str:
       <div class="top">
         <div>
           <h1>饰品查询</h1>
-          <p class="sub">本页已接入 SQLite 本地搜索和利润计算，当前报价为演示数据。</p>
+          <p class="sub">本页已接入 SQLite 本地搜索、SteamDT 实时价格和利润计算。</p>
         </div>
         <div class="status">
           <span class="pill green">SQLite 已连接</span>
+          <span class="pill blue" id="steamdtState">SteamDT 检查中</span>
           <span class="pill blue">FTS 搜索</span>
-          <span class="pill blue">Demo Quote</span>
         </div>
       </div>
       <div class="grid">
         <section class="panel">
           <div class="panel-header">
             <h2>搜索结果</h2>
-            <span class="pill blue" id="resultCount">0 项</span>
+            <span>
+              <button class="small-button" id="syncButton">同步 SteamDT 基础库</button>
+              <span class="pill blue" id="resultCount">0 项</span>
+            </span>
           </div>
           <div class="search-row">
             <input id="searchInput" value="AK" aria-label="搜索饰品">
@@ -359,15 +397,39 @@ def render_browser_page() -> str:
   <script>
     const searchInput = document.getElementById("searchInput");
     const searchButton = document.getElementById("searchButton");
+    const syncButton = document.getElementById("syncButton");
     const results = document.getElementById("results");
     const resultCount = document.getElementById("resultCount");
     const detail = document.getElementById("detail");
     const quoteState = document.getElementById("quoteState");
+    const steamdtState = document.getElementById("steamdtState");
 
     searchButton.addEventListener("click", runSearch);
+    syncButton.addEventListener("click", syncSteamDTBase);
     searchInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") runSearch();
     });
+
+    async function loadSourceStatus() {
+      const response = await fetch("/api/source-status");
+      const payload = await response.json();
+      steamdtState.textContent = payload.steamdt.enabled ? "SteamDT 已启用" : "SteamDT 未配置";
+    }
+
+    async function syncSteamDTBase() {
+      syncButton.disabled = true;
+      syncButton.textContent = "同步中";
+      const response = await fetch("/api/sync/steamdt/base");
+      const payload = await response.json();
+      if (!response.ok) {
+        alert(payload.detail || payload.error || "同步失败");
+      } else {
+        alert(`同步完成：${payload.synced} 条，当前共 ${payload.total} 条`);
+        await runSearch();
+      }
+      syncButton.textContent = "同步 SteamDT 基础库";
+      syncButton.disabled = false;
+    }
 
     async function runSearch() {
       const query = encodeURIComponent(searchInput.value.trim());
@@ -403,16 +465,26 @@ def render_browser_page() -> str:
       const response = await fetch(`/api/quote?market_hash_name=${encodeURIComponent(marketHashName)}`);
       const payload = await response.json();
       if (!response.ok) {
-        detail.innerHTML = `<div class="warning">${escapeHtml(payload.error || "加载失败")}</div>`;
+        if (payload.fallback) {
+          renderQuote(payload.fallback, `${payload.error}: ${payload.detail || ""}`);
+        } else {
+          detail.innerHTML = `<div class="warning">${escapeHtml(payload.error || "加载失败")}</div>`;
+        }
         quoteState.textContent = "失败";
         return;
       }
       quoteState.textContent = "已计算";
+      renderQuote(payload);
+    }
+
+    function renderQuote(payload, errorMessage = "") {
+      const profit = payload.profit || { roi: "-", profit: "-", net_sell_price: "-", spread: "-" };
+      const platforms = payload.platform_prices || [];
       detail.innerHTML = `
         <div class="skin">
           <h3>${escapeHtml(payload.item.market_hash_name)}</h3>
           <p>${escapeHtml(payload.item.name_cn || "-")} · ${escapeHtml(payload.item.category || "未分类")} · ${escapeHtml(payload.item.rarity || "-")}</p>
-          <div><span class="pill green">ROI ${escapeHtml(payload.profit.roi)}</span></div>
+          <div><span class="pill green">ROI ${escapeHtml(profit.roi)}</span></div>
         </div>
         <div class="prices">
           <div class="price">
@@ -427,11 +499,32 @@ def render_browser_page() -> str:
           </div>
           <div class="price profit">
             <span>预计利润</span>
-            <strong>${escapeHtml(payload.profit.profit)}</strong>
-            <span>到手 ${escapeHtml(payload.profit.net_sell_price)} · 价差 ${escapeHtml(payload.profit.spread)}</span>
+            <strong>${escapeHtml(profit.profit)}</strong>
+            <span>到手 ${escapeHtml(profit.net_sell_price)} · 价差 ${escapeHtml(profit.spread)}</span>
           </div>
         </div>
-        <div class="warning">${escapeHtml(payload.warning)}</div>
+        ${renderPlatforms(platforms)}
+        <div class="warning">${escapeHtml(errorMessage || payload.warning)}</div>
+      `;
+    }
+
+    function renderPlatforms(platforms) {
+      if (!platforms.length) return "";
+      return `
+        <div class="platforms">
+          <div class="platform-row header">
+            <span>平台</span><span>挂单价</span><span>在售</span><span>求购价</span><span>求购</span>
+          </div>
+          ${platforms.map((item) => `
+            <div class="platform-row">
+              <span>${escapeHtml(item.platform)}</span>
+              <span>${escapeHtml(item.sell_price)}</span>
+              <span>${escapeHtml(item.sell_count)}</span>
+              <span>${escapeHtml(item.bidding_price)}</span>
+              <span>${escapeHtml(item.bidding_count)}</span>
+            </div>
+          `).join("")}
+        </div>
       `;
     }
 
@@ -444,8 +537,8 @@ def render_browser_page() -> str:
         .replaceAll("'", "&#039;");
     }
 
+    loadSourceStatus();
     runSearch();
   </script>
 </body>
 </html>"""
-
