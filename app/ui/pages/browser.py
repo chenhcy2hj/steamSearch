@@ -306,7 +306,7 @@ def render_browser_page() -> str:
 
     .platform-row {
       display: grid;
-      grid-template-columns: minmax(110px, 1fr) 100px 80px 100px 80px;
+      grid-template-columns: minmax(110px, 1fr) 100px 80px 100px 80px 150px;
       gap: 8px;
       padding: 10px 12px;
       border-bottom: 1px solid var(--line);
@@ -592,12 +592,14 @@ def render_browser_page() -> str:
     function renderQuote(payload, errorMessage = "") {
       const profit = payload.profit || { roi: "-", profit: "-", net_sell_price: "-", spread: "-" };
       const platforms = payload.platform_prices || [];
+      const capturedAt = formatTime(payload.captured_at);
       detail.innerHTML = `
         <div class="skin">
           <h3>${escapeHtml(payload.item.market_hash_name)}</h3>
           <p>${escapeHtml(payload.item.name_cn || "-")} · ${escapeHtml(payload.item.category || "未分类")} · ${escapeHtml(payload.item.rarity || "-")}</p>
           <div>
             <span class="pill green">ROI ${escapeHtml(profit.roi)}</span>
+            <span class="pill blue">获取 ${escapeHtml(capturedAt)}</span>
             <button class="small-button" onclick="addActiveToWatchlist()">加入监控</button>
           </div>
         </div>
@@ -720,7 +722,7 @@ def render_browser_page() -> str:
       return `
         <div class="platforms">
           <div class="platform-row header">
-            <span>平台</span><span>挂单价</span><span>在售</span><span>求购价</span><span>求购</span>
+            <span>平台</span><span>挂单价</span><span>在售</span><span>求购价</span><span>求购</span><span>获取时间</span>
           </div>
           ${platforms.map((item) => `
             <div class="platform-row">
@@ -729,10 +731,18 @@ def render_browser_page() -> str:
               <span>${escapeHtml(item.sell_count)}</span>
               <span>${escapeHtml(item.bidding_price)}</span>
               <span>${escapeHtml(item.bidding_count)}</span>
+              <span>${escapeHtml(formatTime(item.captured_at))}</span>
             </div>
           `).join("")}
         </div>
       `;
+    }
+
+    function formatTime(value) {
+      if (!value) return "未记录";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString("zh-CN", { hour12: false });
     }
 
     function escapeHtml(value) {

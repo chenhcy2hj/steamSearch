@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import socket
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from decimal import Decimal
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -16,12 +16,13 @@ from app.buff.client import BuffClient
 from app.buff.dto import BuffListingSummary
 from app.buff.service import BuffService
 from app.market.calculator import ProfitCalculator, quantize_money, quantize_percent
-from app.market.scanner import RadarFilters, RadarResult, RadarScanner, build_demo_radar_candidate
+from app.market.scanner import RadarCandidate, RadarFilters, RadarResult, RadarScanner, build_demo_radar_candidate
 from app.storage.models import ItemAliasInput, ItemInput, ItemRecord, WatchlistInput, WatchlistRecord
 from app.storage.repositories.items import ItemRepository
+from app.storage.repositories.prices import PriceSnapshotRepository
 from app.storage.repositories.watchlist import WatchlistRepository
 from app.steamdt.client import SteamDTClient
-from app.steamdt.dto import SteamDTPlatformPrice
+from app.steamdt.dto import SteamDTBatchPrice, SteamDTPlatformPrice
 from app.steamdt.service import SteamDTService
 from app.ui.pages.browser import render_browser_page
 
@@ -35,6 +36,7 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, no_demo_data:
     context = bootstrap_app()
     item_repository = ItemRepository(context.database)
     watchlist_repository = WatchlistRepository(context.database)
+    price_repository = PriceSnapshotRepository(context.database)
     if not no_demo_data:
         seed_demo_items_if_empty(item_repository)
 
@@ -49,6 +51,7 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, no_demo_data:
         context,
         item_repository,
         watchlist_repository,
+        price_repository,
         steamdt_client,
         buff_service,
     )
@@ -86,6 +89,7 @@ def build_server(
     context: AppContext,
     item_repository: ItemRepository,
     watchlist_repository: WatchlistRepository,
+    price_repository: PriceSnapshotRepository,
     steamdt_client: SteamDTClient | None = None,
     buff_service: BuffService | None = None,
 ) -> HTTPServer:
@@ -93,6 +97,7 @@ def build_server(
         app_context = context
         repository = item_repository
         watchlist = watchlist_repository
+        price_snapshots = price_repository
         steamdt = steamdt_client
         buff = buff_service
 
@@ -126,6 +131,7 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
     app_context: AppContext
     repository: ItemRepository
     watchlist: WatchlistRepository
+    price_snapshots: PriceSnapshotRepository
     steamdt: SteamDTClient | None
     buff: BuffService | None
 
@@ -202,11 +208,21 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "item not found"}, status=HTTPStatus.NOT_FOUND)
             return
         if self.steamdt is None:
-            self._send_json(build_demo_quote(item, self.app_context.settings.market, self._fetch_buff(item)))
+            buff_summary = self._fetch_buff(item)
+            captured_at = self._persist_buff_summary(item.id, buff_summary)
+            self._send_json(
+                build_demo_quote(
+                    item,
+                    self.app_context.settings.market,
+                    buff_summary,
+                    captured_at=captured_at,
+                )
+            )
             return
 
         try:
             prices = asyncio.run(self.steamdt.fetch_single_price(item.market_hash_name))
+            captured_at = self.price_snapshots.save_steamdt_prices(item.id, prices)
         except Exception as error:
             self._send_json(
                 {
@@ -218,7 +234,17 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        self._send_json(build_steamdt_quote(item, prices, self.app_context.settings.market, self._fetch_buff(item)))
+        buff_summary = self._fetch_buff(item)
+        buff_captured_at = self._persist_buff_summary(item.id, buff_summary)
+        self._send_json(
+            build_steamdt_quote(
+                item,
+                prices,
+                self.app_context.settings.market,
+                buff_summary,
+                captured_at=buff_captured_at or captured_at,
+            )
+        )
 
     def _handle_list_watchlist(self) -> None:
         self._send_json({"items": [_watchlist_to_json(item) for item in self.watchlist.list_all()]})
@@ -231,15 +257,31 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         min_roi = _optional_decimal(_first(query, "min_roi", "0")) or Decimal("0")
 
         items = self.repository.search(keyword, limit=source_limit)
-        candidates = [
-            build_demo_radar_candidate(
-                item_id=item.id,
-                market_hash_name=item.market_hash_name,
-                name_cn=item.name_cn,
-                category=item.category,
+        source = "local-demo"
+        warning = "Radar 使用本地估算价格排序；配置 SteamDT 后可进行批量粗筛。"
+        candidates = build_demo_radar_candidates(items)
+
+        if self.steamdt is not None and items:
+            try:
+                batches = asyncio.run(
+                    self.steamdt.fetch_batch_prices([item.market_hash_name for item in items])
+                )
+                candidates = build_steamdt_radar_candidates(items, batches)
+                source = "steamdt-batch"
+                warning = "Radar 已使用 SteamDT 批量价格粗筛；BUFF 慢速确认仍未启用。"
+            except Exception as error:
+                warning = f"SteamDT 批量粗筛失败，已降级到本地估算：{error}"
+
+        if self.buff is not None and candidates:
+            candidates, buff_stats = asyncio.run(
+                confirm_radar_candidates_with_buff(
+                    candidates,
+                    self.buff,
+                    max_items=self.app_context.settings.buff.max_items_per_scan,
+                )
             )
-            for item in items
-        ]
+            warning = _radar_warning_with_buff(warning, buff_stats)
+
         scanner = RadarScanner(
             steam_fee_rate=Decimal(str(self.app_context.settings.market.steam_fee_rate)),
             wallet_discount_rate=Decimal(str(self.app_context.settings.market.wallet_discount_rate)),
@@ -255,8 +297,8 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
         self._send_json(
             {
                 "items": [_radar_to_json(item) for item in results],
-                "source": "local-demo",
-                "warning": "Radar 初版使用本地估算价格排序，未进行 SteamDT 批量粗筛或 BUFF 慢速确认。",
+                "source": source,
+                "warning": warning,
             }
         )
 
@@ -305,6 +347,15 @@ class BrowserRequestHandler(BaseHTTPRequestHandler):
             return asyncio.run(self.buff.fetch_listing_summary(item.market_hash_name))
         except Exception as error:
             return error
+
+    def _persist_buff_summary(
+        self,
+        item_id: int,
+        buff_summary: BuffListingSummary | Exception | None,
+    ) -> str | None:
+        if not isinstance(buff_summary, BuffListingSummary):
+            return None
+        return self.price_snapshots.save_buff_summary(item_id, buff_summary)
 
     def _handle_sync_steamdt_base(self) -> None:
         if self.steamdt is None:
@@ -416,6 +467,7 @@ def build_steamdt_quote(
     prices: list[SteamDTPlatformPrice],
     market_settings: Any,
     buff_summary: BuffListingSummary | Exception | None = None,
+    captured_at: str | None = None,
 ) -> dict[str, Any]:
     positive_prices = [price for price in prices if price.sell_price > 0]
     steamdt_buy_price = _lowest_price(positive_prices)
@@ -445,9 +497,10 @@ def build_steamdt_quote(
             "sell": _source_json(sell_price, "SteamDT 卖出估算"),
         },
         "profit": profit,
-        "platform_prices": [_platform_price_json(price) for price in positive_prices],
+        "platform_prices": [_platform_price_json(price, captured_at=captured_at) for price in positive_prices],
         "warning": _quote_warning("SteamDT", buff_summary),
         "live": True,
+        "captured_at": captured_at,
     }
 
 
@@ -455,6 +508,7 @@ def build_demo_quote(
     item: ItemRecord,
     market_settings: Any,
     buff_summary: BuffListingSummary | Exception | None = None,
+    captured_at: str | None = None,
 ) -> dict[str, Any]:
     demo_buy_price, sell_price = _demo_prices(item)
     buy_price = _quote_buy_price(None, buff_summary)
@@ -496,7 +550,87 @@ def build_demo_quote(
         "platform_prices": [],
         "warning": _quote_warning("演示数据", buff_summary),
         "live": False,
+        "captured_at": captured_at,
     }
+
+
+def build_demo_radar_candidates(items: list[ItemRecord]) -> list[RadarCandidate]:
+    return [
+        build_demo_radar_candidate(
+            item_id=item.id,
+            market_hash_name=item.market_hash_name,
+            name_cn=item.name_cn,
+            category=item.category,
+        )
+        for item in items
+    ]
+
+
+def build_steamdt_radar_candidates(
+    items: list[ItemRecord],
+    batches: list[SteamDTBatchPrice],
+) -> list[RadarCandidate]:
+    batch_by_name = {batch.market_hash_name: batch for batch in batches}
+    candidates: list[RadarCandidate] = []
+
+    for item in items:
+        batch = batch_by_name.get(item.market_hash_name)
+        if batch is None:
+            continue
+        positive_prices = [price for price in batch.data_list if price.sell_price > 0]
+        buy_price = _lowest_price(positive_prices)
+        sell_price = _steam_sell_price(positive_prices) or _highest_price(positive_prices)
+        if buy_price is None or sell_price is None:
+            continue
+        candidates.append(
+            RadarCandidate(
+                item_id=item.id,
+                market_hash_name=item.market_hash_name,
+                name_cn=item.name_cn,
+                category=item.category,
+                buy_price=buy_price.sell_price,
+                sell_price=sell_price.sell_price,
+            )
+        )
+
+    return candidates
+
+
+async def confirm_radar_candidates_with_buff(
+    candidates: list[RadarCandidate],
+    buff_service: BuffService,
+    max_items: int,
+) -> tuple[list[RadarCandidate], dict[str, int]]:
+    limit = max(max_items, 0)
+    confirmed_by_name: dict[str, Decimal] = {}
+    failed = 0
+
+    for candidate in candidates[:limit]:
+        try:
+            summary = await buff_service.fetch_listing_summary(candidate.market_hash_name)
+        except Exception:
+            failed += 1
+            continue
+        if summary.lowest_price > 0:
+            confirmed_by_name[candidate.market_hash_name] = Decimal(str(summary.lowest_price))
+
+    confirmed_candidates = [
+        replace(candidate, buy_price=confirmed_by_name[candidate.market_hash_name])
+        if candidate.market_hash_name in confirmed_by_name
+        else candidate
+        for candidate in candidates
+    ]
+    return confirmed_candidates, {"confirmed": len(confirmed_by_name), "failed": failed}
+
+
+def _radar_warning_with_buff(warning: str, stats: dict[str, int]) -> str:
+    confirmed = stats.get("confirmed", 0)
+    failed = stats.get("failed", 0)
+    if confirmed <= 0 and failed <= 0:
+        return f"{warning}；BUFF 已启用，但本次没有可确认候选。"
+    if failed > 0:
+        return f"{warning}；BUFF 已确认 {confirmed} 个候选，失败 {failed} 个。"
+    return f"{warning}；BUFF 已确认 {confirmed} 个候选。"
 
 
 def _quote_buy_price(
@@ -577,7 +711,7 @@ def _source_json(price: SteamDTPlatformPrice | None, fallback_name: str) -> dict
     }
 
 
-def _platform_price_json(price: SteamDTPlatformPrice) -> dict[str, Any]:
+def _platform_price_json(price: SteamDTPlatformPrice, captured_at: str | None = None) -> dict[str, Any]:
     return {
         "platform": price.platform,
         "platform_item_id": price.platform_item_id,
@@ -586,6 +720,7 @@ def _platform_price_json(price: SteamDTPlatformPrice) -> dict[str, Any]:
         "bidding_price": _money(price.bidding_price),
         "bidding_count": price.bidding_count,
         "update_time": price.update_time,
+        "captured_at": captured_at,
     }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 
 @dataclass(frozen=True)
@@ -58,3 +59,17 @@ class WatchlistRecord:
     note: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class PriceSnapshotRecord:
+    id: int
+    item_id: int
+    source: str
+    buy_price: Decimal | None
+    sell_price: Decimal | None
+    lowest_price: Decimal | None
+    sell_count: int | None
+    currency: str
+    raw_json: str | None
+    captured_at: str

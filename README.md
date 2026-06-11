@@ -2,7 +2,7 @@
 
 SteamSearch is a CS2 skin price query and opportunity scanning tool.
 
-Current phase: lightweight browser preview with SQLite search and SteamDT live price support.
+Current phase: lightweight browser preview with SQLite search, SteamDT live price support, watchlist, and first-pass Radar scanning.
 
 ## Run
 
@@ -51,6 +51,8 @@ Or use an environment variable:
 export STEAMDT_API_KEY="your-api-key"
 ```
 
+Environment variables override `config/config.local.toml`, so restart the service after changing either source.
+
 Enable BUFF single-item enhancement when you have a logged-in BUFF cookie:
 
 ```bash
@@ -70,6 +72,8 @@ python3.12 -m app.main web
 
 The preview uses the real SQLite search path. If no SteamDT base data exists yet, it seeds local demo items for viewing.
 Click "同步 SteamDT 基础库" in the browser to import real SteamDT base items into SQLite.
+Radar uses SteamDT batch prices when SteamDT is configured, confirms a small candidate set with BUFF when enabled, and falls back to local demo estimates when the API is unavailable.
+Successful SteamDT and BUFF price queries are stored locally as price snapshots, and the browser shows the capture time for displayed records.
 
 ## Verify
 

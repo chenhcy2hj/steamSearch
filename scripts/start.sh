@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export STEAMDT_API_KEY="34f2989be64a41ae9f70b0e395582e17"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="$ROOT_DIR/run"
 LOG_DIR="$ROOT_DIR/logs"
@@ -13,6 +12,10 @@ PORT="${STEAMSEARCH_PORT:-8765}"
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
+if [[ -n "${STEAMDT_API_KEY:-}" ]]; then
+  echo "STEAMDT_API_KEY is set in the environment and will override config/config.local.toml."
+fi
+
 if [[ -f "$PID_FILE" ]]; then
   OLD_PID="$(cat "$PID_FILE")"
   if kill -0 "$OLD_PID" 2>/dev/null; then
@@ -22,6 +25,15 @@ if [[ -f "$PID_FILE" ]]; then
     fi
     echo "PID: $OLD_PID"
     exit 0
+  fi
+  rm -f "$PID_FILE" "$URL_FILE"
+fi
+
+if command -v lsof >/dev/null 2>&1; then
+  PORT_PIDS="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -n "$PORT_PIDS" ]]; then
+    echo "Port $PORT is already used by PID(s): $PORT_PIDS"
+    echo "SteamSearch will try the next available port. Use ./scripts/status.sh to see the final URL."
   fi
 fi
 
